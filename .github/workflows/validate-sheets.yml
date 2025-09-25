@@ -1,0 +1,18 @@
+name: Validate Google Sheets
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 5 * * *"
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install --upgrade pip google-api-python-client google-auth google-auth-httplib2
+      - env:
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+          GOOGLE_APPLICATION_CREDENTIALS_JSON: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS_JSON }}
+        run: |
+          python validate_google_sheet.py

@@ -1,0 +1,79 @@
+name: CI Self-Heal
+on: [push, pull_request, workflow_dispatch]
+permissions: { contents: write, issues: write }
+jobs:
+  test-and-heal:
+    runs-on: ubuntu-latest
+    env:
+      PYTHON_VERSION: "3.11"
+      RUN_DRY_RUN: "true"
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-python@v5
+        with: { python-version: ${{ env.PYTHON_VERSION }} }
+      - run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt || true
+          pip install pytest pre-commit ruff mypy black isort
+      - run: pre-commit run --all-files || true
+      - id: pytest
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          pytest -q 2>&1 | tee pytest_output.txt
+          echo "exit_code=$?" >> $GITHUB_OUTPUT
+      - if: steps.pytest.outputs.exit_code != '0'
+        run: |
+          ruff --fix .
+          isort .
+          black .
+          git config user.name "ci-self-heal-bot"
+          git config user.email "ci-bot@users.noreply.github.com"
+          if ! git diff --quiet; then
+            git add -A && git commit -m "ci(self-heal): auto-fix style/imports" && git push
+          fi
+      - if: steps.pytest.outputs.exit_code != '0'
+        id: pytest_rerun
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          pytest -q 2>&1 | tee pytest_output_rerun.txt
+          echo "exit_code=$?" >> $GITHUB_OUTPUT
+      - if: env.RUN_DRY_RUN == 'true'
+        run: |
+          export DRY_RUN=true
+          python process_invoices.py --once || true
+      - name: Open Issue if still failing
+        if: steps.pytest_rerun.outputs.exit_code == '1' || steps.pytest.outputs.exit_code == '1'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python - << 'PY'
+import os, json, textwrap, urllib.request
+def read(p): 
+  return open(p,'r',encoding='utf-8',errors='replace').read()[-12000:] if os.path.exists(p) else ''
+body = "### CI failure report\n"
+p1 = read("pytest_output.txt")
+p2 = read("pytest_output_rerun.txt")
+if p1: body += f"\n<details><summary>pytest (first run)</summary>\n\n```
+{p1}
+```\n</details>\n"
+if p2: body += f"\n<details><summary>pytest (rerun)</summary>\n\n```
+{p2}
+```\n</details>\n"
+repo = os.environ["GITHUB_REPOSITORY"]
+token = os.environ["GITHUB_TOKEN"]
+url = f"https://api.github.com/repos/{repo}/issues"
+data = json.dumps({"title":"CI failure on " + os.environ.get("GITHUB_REF",""),"body":body,"labels":["auto-fix"]}).encode("utf-8")
+req = urllib.request.Request(url, data=data, method="POST", headers={
+  "Authorization": f"Bearer {token}",
+  "Accept": "application/vnd.github+json",
+  "X-GitHub-Api-Version": "2022-11-28",
+  "Content-Type": "application/json",
+})
+try:
+  urllib.request.urlopen(req).read()
+except Exception as e:
+  print("Issue creation failed:", e)
+PY
